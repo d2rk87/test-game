@@ -1,695 +1,743 @@
 <!doctype html>
 <html lang="ru">
+
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Bunny Jump — Veggie Hunt</title>
-  <style>
-    html, body { margin: 0; height: 100%; background: #0f1220; }
-    #game { width: 100%; height: 100%; display: grid; place-items: center; }
-    canvas { border-radius: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.35); }
-  </style>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bunny Jump — Veggie Hunt</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #0f1220;
+        }
+
+        #game {
+            width: 100%;
+            height: 100%;
+            display: grid;
+            place-items: center;
+        }
+
+        canvas {
+            border-radius: 16px;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
+        }
+    </style>
 </head>
+
 <body>
-<div id="game"></div>
-
-<script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
-<script>
-  const W = 960;
-  const H = 720;
-
-  // Bunny sheet: 192x128 => 6x4 => 32x32
-  const FRAME_W = 32;
-  const FRAME_H = 32;
-
-  // Gameplay
-  const GROUND_Y = 600;
-  const SPAWN = { x: 150, y: 440 };
-
-  const MAX_PULL = 230;
-  const POWER = 7.0;
-
-  const VEL_LIMIT = 1900;
-  const PHYSICS_FPS = 180;
-
-  // Attempts
-  const MAX_ATTEMPTS = 3;
-  let attemptsLeft = MAX_ATTEMPTS;
-
-  // End-of-attempt / auto reset
-  const REST_FRAMES_TO_RESET = 7;
-  const MIN_SPEED_REST = 18;
-  const ATTEMPT_TIMEOUT_MS = 2200;
-  const MIN_SPEED_TIMEOUT = 90;
-
-  // Targets count
-  const COUNT_CABBAGE = 3; // +10
-  const COUNT_CARROT  = 3; // +20
-  const COUNT_PEPPER  = 2; // end attempt
-
-  // Movement
-  const TARGET_MOVE_PADDING = 70;
-
-  // Swept collision fudge
-  const HIT_FUDGE = 3;
-
-  // Debug (D) 10s
-  const DEBUG_DURATION_MS = 10000;
-
-  const config = {
-    type: Phaser.AUTO,
-    parent: "game",
-    backgroundColor: "#141a2a",
-    physics: {
-      default: "arcade",
-      arcade: {
-        gravity: { y: 1150 },
-        debug: false,
-        fps: PHYSICS_FPS
-      }
-    },
-    scale: {
-      mode: Phaser.Scale.FIT,
-      autoCenter: Phaser.Scale.CENTER_BOTH,
-      width: W,
-      height: H
-    },
-    scene: { preload, create, update }
-  };
-
-  new Phaser.Game(config);
-
-  let bunny, targets, ground, hud, aimGfx, dbgGfx;
-  let score = 0;
-
-  let aiming = false;
-  let previewVel = { vx: 0, vy: 0 };
-  let previewPullLen = 0;
-
-  let jumpActive = false;
-  let restFrames = 0;
-  let attemptStartMs = 0;
-
-  // Swept collision prev bunny center
-  let prevCx = 0, prevCy = 0;
-
-  // Prevent land spam
-  let landedOnce = false;
-
-  // Debug
-  let debugOn = false;
-  let debugUntilMs = 0;
-
-  function preload() {
-    // Bunny spritesheet
-    this.load.spritesheet("bunny", "assets/bunny.png", {
-      frameWidth: FRAME_W,
-      frameHeight: FRAME_H
-    });
-
-    // Veggies (your images)
-    this.load.image("cabbage", "assets/cabbage.png");
-    this.load.image("carrot",  "assets/carrot.png");
-    this.load.image("pepper",  "assets/pepper.png");
-
-    this.load.image("bg", "assets/bg.png");
-
-    // Optional background image (if you have it)
-    // this.load.image("bg", "assets/bg.png");
-
-    this.load.on("loaderror", (f) => console.error("LOAD ERROR:", f.key, f.src));
-  }
-
-  function create() {
-    const scene = this;
-    scene.physics.world.setBounds(0, 0, W, H);
-
-    // Background: either image or procedural
-    // If you have bg.png uncomment the load + next line:
-    // scene.add.image(W/2, H/2, "bg").setDisplaySize(W, H).setDepth(-10);
-    // drawBackground(scene);
-
-    const bg = scene.add.image(W / 2, H / 2, "bg").setDepth(-10);
-    bg.setDisplaySize(W, H);
-
-    // 1x1 texture for invisible bodies
-    const g = scene.add.graphics();
-    g.fillStyle(0xffffff, 1);
-    g.fillRect(0, 0, 1, 1);
-    g.generateTexture("px", 1, 1);
-    g.destroy();
-
-    // Invisible ground
-    ground = scene.physics.add.staticImage(W / 2, GROUND_Y, "px")
-      .setDisplaySize(W, 30)
-      .setAlpha(0)
-      .refreshBody();
-
-    // HUD
-    hud = scene.add.text(16, 680, "", {
-      fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
-      fontSize: "16px",
-      color: "#e8e8f0"
-    });
-
-    // Bunny
-    bunny = scene.physics.add.sprite(SPAWN.x, SPAWN.y, "bunny", 19);
-    bunny.setScale(2.2);
-    bunny.setCollideWorldBounds(true);
-    bunny.setBounce(0);
-    bunny.setDrag(40, 0);
-    bunny.setMaxVelocity(VEL_LIMIT, VEL_LIMIT);
-    applyBunnyCircleBody(bunny);
-
-    scene.physics.add.collider(bunny, ground);
-
-    // Animations
-    createBunnyAnimations(scene);
-    bunny.play("idle");
-
-    bunny.on("animationcomplete-land", () => safePlay("idle"));
-
-    // Targets group (moving)
-    targets = scene.physics.add.group({
-      immovable: true,
-      allowGravity: false
-    });
-
-    aimGfx = scene.add.graphics();
-    dbgGfx = scene.add.graphics();
-
-    // Input
-    scene.input.on("pointerdown", (p) => {
-      if (jumpActive) return;
-      if (attemptsLeft <= 0) return;
-
-      const dist = Phaser.Math.Distance.Between(p.x, p.y, bunny.x, bunny.y);
-      if (dist < 160 && bunny.body.speed < 35) {
-        aiming = true;
-        previewPullLen = 0;
-      }
-    });
-
-    scene.input.on("pointermove", (p) => {
-      if (!aiming) return;
-
-      let dx = bunny.x - p.x;
-      let dy = bunny.y - p.y;
-
-      const len = Math.hypot(dx, dy) || 1;
-      const k = Math.min(1, MAX_PULL / len);
-      dx *= k; dy *= k;
-
-      previewPullLen = Math.hypot(dx, dy);
-
-      let vx = dx * POWER;
-      let vy = dy * POWER;
-
-      const mag = Math.hypot(vx, vy) || 1;
-      if (mag > VEL_LIMIT) {
-        const s = VEL_LIMIT / mag;
-        vx *= s; vy *= s;
-      }
-
-      previewVel.vx = vx;
-      previewVel.vy = vy;
-
-      drawAim(scene, dx, dy, vx, vy);
-    });
-
-    scene.input.on("pointerup", () => {
-      if (!aiming) return;
-      aiming = false;
-      aimGfx.clear();
-
-      if (previewPullLen < 10) return;
-      if (attemptsLeft <= 0) return;
-
-      // consume attempt
-      attemptsLeft = Math.max(0, attemptsLeft - 1);
-      updateHud();
-
-      // Set prev for swept check
-      prevCx = bunny.body.center.x;
-      prevCy = bunny.body.center.y;
-
-      bunny.setVelocity(previewVel.vx, previewVel.vy);
-      jumpActive = true;
-      restFrames = 0;
-      landedOnce = false;
-      attemptStartMs = scene.time.now;
-
-      bunny.setFlipX(bunny.body.velocity.x < 0);
-      safePlay("jump"); // ends on frame 23 (air) — looks good
-    });
-
-    // Keys
-    scene.input.keyboard?.on("keydown-R", () => restart(scene));
-    scene.input.keyboard?.on("keydown-D", () => {
-      debugOn = true;
-      debugUntilMs = scene.time.now + DEBUG_DURATION_MS;
-    });
-
-    restart(scene);
-  }
-
-  // -----------------------
-  // Background (procedural)
-  // -----------------------
-  function drawBackground(scene) {
-    const bg = scene.add.graphics();
-    bg.fillStyle(0x0f1430, 1);
-    bg.fillRect(0, 0, W, H);
-
-    bg.fillStyle(0x1a2352, 0.55);
-    bg.fillCircle(160, 140, 180);
-    bg.fillCircle(520, 90, 240);
-    bg.fillCircle(860, 170, 210);
-
-    bg.fillStyle(0x0b1022, 0.85);
-    bg.fillRect(0, GROUND_Y + 8, W, H - (GROUND_Y + 8));
-
-    bg.lineStyle(2, 0xffffff, 0.08);
-    bg.beginPath();
-    bg.moveTo(0, GROUND_Y);
-    bg.lineTo(W, GROUND_Y);
-    bg.strokePath();
-
-    bg.setDepth(-10);
-  }
-
-  // -----------------------
-  // Animations / helpers
-  // -----------------------
-  function createBunnyAnimations(scene) {
-    scene.anims.create({
-      key: "idle",
-      frames: [{ key: "bunny", frame: 19 }],
-      frameRate: 0,
-      repeat: 0
-    });
-
-    scene.anims.create({
-      key: "jump",
-      frames: [
-        { key: "bunny", frame: 20 },
-        { key: "bunny", frame: 21 },
-        { key: "bunny", frame: 22 },
-        { key: "bunny", frame: 23 }
-      ],
-      frameRate: 6,
-      repeat: 0
-    });
-
-    scene.anims.create({
-      key: "land",
-      frames: [
-        { key: "bunny", frame: 23 },
-        { key: "bunny", frame: 19 }
-      ],
-      frameRate: 8,
-      repeat: 0
-    });
-
-    scene.anims.create({
-      key: "eat",
-      frames: [{ key: "bunny", frame: 2 }, { key: "bunny", frame: 23 }],
-      frameRate: 10,
-      repeat: 0
-    });
-  }
-
-  function safePlay(key) {
-    const cur = bunny.anims.currentAnim?.key;
-    if (cur === key) return;
-    bunny.play(key, true);
-  }
-
-  function applyBunnyCircleBody(spr) {
-    const r = Math.round(Math.min(spr.displayWidth, spr.displayHeight) * 0.30);
-    spr.body.setCircle(r);
-    const offX = Math.round(spr.displayWidth / 2 - r);
-    const offY = Math.round(spr.displayHeight / 2 - r);
-    spr.body.setOffset(offX, offY);
-    spr._hitRadius = r;
-  }
-
-  function setCircleHitboxToSprite(sprite, radiusFactor = 0.36) {
-    const r = Math.round(Math.min(sprite.displayWidth, sprite.displayHeight) * radiusFactor);
-    sprite.body.setCircle(r);
-    sprite.body.setOffset((sprite.displayWidth / 2) - r, (sprite.displayHeight / 2) - r);
-    sprite.setData("hitR", r);
-  }
-
-  // -----------------------
-  // Targets: spawn + movement
-  // -----------------------
-  function spawnTargets(scene) {
-    targets.clear(true, true);
-
-    const items = [];
-    for (let i = 0; i < COUNT_CABBAGE; i++) items.push({ key: "cabbage", points: 10, bad: false });
-    for (let i = 0; i < COUNT_CARROT;  i++) items.push({ key: "carrot",  points: 20, bad: false });
-    for (let i = 0; i < COUNT_PEPPER;  i++) items.push({ key: "pepper",  points: 0,  bad: true  });
-
-    // shuffle
-    Phaser.Utils.Array.Shuffle(items);
-
-    const minX = 430;
-    const maxX = W - 80;
-    const minY = 170;
-    const maxY = 520;
-
-    // Avoid overlaps
-    const placed = [];
-    const minDist = 90;
-
-    for (const it of items) {
-      let x, y, tries = 0;
-      do {
-        x = Phaser.Math.Between(minX, maxX);
-        y = Phaser.Math.Between(minY, maxY);
-        tries++;
-      } while (tries < 40 && placed.some(p => Phaser.Math.Distance.Between(p.x, p.y, x, y) < minDist));
-
-      placed.push({ x, y });
-
-      const s = targets.create(x, y, it.key);
-      s.setData("points", it.points);
-      s.setData("bad", it.bad);
-      s.setData("hit", false);
-
-      // Auto-scale targets to ~64px (feel free to change)
-      const tex = scene.textures.get(it.key).getSourceImage();
-      const desired = 64;
-      const scale = desired / Math.max(tex.width, tex.height);
-      s.setScale(scale);
-
-      setCircleHitboxToSprite(s, 0.38);
-
-      // Movement bounds + velocity
-      const amp = Phaser.Math.Between(90, 200);
-      const speed = Phaser.Math.Between(70, 160) * (Math.random() < 0.5 ? 1 : -1);
-
-      const minTX = Math.max(TARGET_MOVE_PADDING, x - amp);
-      const maxTX = Math.min(W - TARGET_MOVE_PADDING, x + amp);
-
-      s.setData("minX", minTX);
-      s.setData("maxX", maxTX);
-      s.setData("vx", speed);
-      s.setVelocityX(speed);
-    }
-  }
-
-  function moveTargets() {
-    for (const t of targets.getChildren()) {
-      if (!t.active || t.getData("hit")) continue;
-
-      const minX = t.getData("minX");
-      const maxX = t.getData("maxX");
-      let vx = t.getData("vx") || 0;
-
-      if (t.x <= minX && vx < 0) {
-        vx = Math.abs(vx);
-        t.setData("vx", vx);
-        t.setVelocityX(vx);
-      } else if (t.x >= maxX && vx > 0) {
-        vx = -Math.abs(vx);
-        t.setData("vx", vx);
-        t.setVelocityX(vx);
-      }
-    }
-  }
-
-  // -----------------------
-  // Swept collision
-  // -----------------------
-  function segmentIntersectsCircle(ax, ay, bx, by, cx, cy, r) {
-    const dx = bx - ax, dy = by - ay;
-    const a = dx*dx + dy*dy;
-    if (a < 1e-6) {
-      const px = ax - cx, py = ay - cy;
-      return (px*px + py*py) <= r*r;
-    }
-    const t = ((cx - ax)*dx + (cy - ay)*dy) / a;
-    const tt = Math.max(0, Math.min(1, t));
-    const ex = ax + tt*dx, ey = ay + tt*dy;
-    const fx = ex - cx, fy = ey - cy;
-    return (fx*fx + fy*fy) <= r*r;
-  }
-
-  function sweptHitCheck(scene) {
-    if (!jumpActive) return;
-
-    const curCx = bunny.body.center.x;
-    const curCy = bunny.body.center.y;
-
-    const bunnyR = bunny.body.radius || bunny._hitRadius || 16;
-
-    for (const t of targets.getChildren()) {
-      if (!t.active || t.getData("hit")) continue;
-
-      const tr = (t.body.radius || t.getData("hitR") || 20);
-      const rr = tr + bunnyR + HIT_FUDGE;
-
-      const hit = segmentIntersectsCircle(
-        prevCx, prevCy,
-        curCx, curCy,
-        t.body.center.x, t.body.center.y,
-        rr
-      );
-
-      if (hit) { onHitTarget(scene, t); break; }
-    }
-
-    prevCx = curCx;
-    prevCy = curCy;
-  }
-
-  function onHitTarget(scene, t) {
-    if (t.getData("hit")) return;
-    t.setData("hit", true);
-
-    const bad = t.getData("bad");
-    const points = t.getData("points") || 0;
-
-    // small flash
-    const flash = scene.add.rectangle(t.x, t.y, 70, 70, 0xffffff, 0.15);
-    scene.tweens.add({
-      targets: flash,
-      alpha: 0,
-      scale: 1.6,
-      duration: 150,
-      onComplete: () => flash.destroy()
-    });
-
-    if (bad) {
-      scene.cameras.main.shake(120, 0.004);
-
-      scene.tweens.add({
-        targets: t,
-        alpha: 0,
-        scale: 0,
-        duration: 140,
-        onComplete: () => t.disableBody(true, true)
-      });
-
-      endAttempt(scene, { pepper: true });
-      return;
-    }
-
-    // good hit
-    score += points;
-    updateHud();
-
-    safePlay("eat");
-    scene.time.delayedCall(120, () => {
-      if (jumpActive) safePlay("jump");
-      else safePlay("idle");
-    });
-
-    scene.tweens.add({
-      targets: t,
-      alpha: 0,
-      scale: 0,
-      duration: 160,
-      onComplete: () => t.disableBody(true, true)
-    });
-
-    bunny.setVelocity(bunny.body.velocity.x * 0.75, Math.min(bunny.body.velocity.y, -240));
-
-    const remainingGood = targets.getChildren().filter(x => x.active && !x.getData("bad")).length;
-    if (remainingGood === 0) {
-      jumpActive = false;
-      hud.setText(`🎉 WIN! Score: ${score}. Press R to restart.`);
-      bunny.setVelocity(0, 0);
-      safePlay("idle");
-    }
-  }
-
-  // -----------------------
-  // Aim
-  // -----------------------
-  function drawAim(scene, dx, dy, vx, vy) {
-    aimGfx.clear();
-
-    const pullX = bunny.x - dx;
-    const pullY = bunny.y - dy;
-
-    aimGfx.lineStyle(4, 0x4cc9f0, 0.9);
-    aimGfx.beginPath();
-    aimGfx.moveTo(bunny.x, bunny.y);
-    aimGfx.lineTo(pullX, pullY);
-    aimGfx.strokePath();
-
-    const g = scene.physics.world.gravity.y;
-    aimGfx.fillStyle(0xffffff, 0.55);
-
-    for (let i = 1; i <= 18; i++) {
-      const tt = i * 0.07;
-      const px = bunny.x + vx * tt;
-      const py = bunny.y + vy * tt + 0.5 * g * tt * tt;
-      if (px < 0 || px > W || py < 0 || py > H) break;
-      aimGfx.fillCircle(px, py, 3);
-    }
-  }
-
-  // -----------------------
-  // HUD + flow
-  // -----------------------
-  function updateHud() {
-    const remainingGood = targets
-      ? targets.getChildren().filter(t => t.active && !t.getData("bad")).length
-      : 0;
-
-    hud.setText(
-      `Score: ${score} | Attempts: ${attemptsLeft}/${MAX_ATTEMPTS} | Targets: ${remainingGood}\n` +
-      `Drag & release | R — restart | D — debug (10s) | Pepper = end attempt`
-    );
-  }
-
-  function resetBunnyPosition() {
-    bunny.setVelocity(0, 0);
-    bunny.setRotation(0);
-    bunny.body.reset(SPAWN.x, SPAWN.y);
-    bunny.setFlipX(false);
-    safePlay("idle");
-
-    prevCx = bunny.body.center.x;
-    prevCy = bunny.body.center.y;
-  }
-
-  function endAttempt(scene, opts = {}) {
-    jumpActive = false;
-    restFrames = 0;
-    landedOnce = false;
-
-    scene.time.delayedCall(opts.pepper ? 180 : 120, () => {
-      resetBunnyPosition();
-
-      if (attemptsLeft <= 0) {
-        hud.setText(`💀 GAME OVER! Score: ${score}. Press R to restart.`);
-      } else {
-        updateHud();
-      }
-    });
-  }
-
-  function restart(scene) {
-    score = 0;
-    attemptsLeft = MAX_ATTEMPTS;
-
-    jumpActive = false;
-    restFrames = 0;
-    landedOnce = false;
-
-    spawnTargets(scene);
-    resetBunnyPosition();
-
-    aimGfx?.clear();
-    dbgGfx?.clear();
-    debugOn = false;
-
-    updateHud();
-  }
-
-  // -----------------------
-  // Debug
-  // -----------------------
-  function drawDebug(scene) {
-    dbgGfx.clear();
-
-    // bunny circle (accurate center)
-    dbgGfx.lineStyle(3, 0x00b7ff, 0.9);
-    const bcx = bunny.body.x + bunny.body.offset.x + bunny.body.radius;
-    const bcy = bunny.body.y + bunny.body.offset.y + bunny.body.radius;
-    dbgGfx.strokeCircle(bcx, bcy, bunny.body.radius);
-
-    // targets circles
-    dbgGfx.lineStyle(3, 0xff2d95, 0.9);
-    for (const t of targets.getChildren()) {
-      if (!t.active) continue;
-      dbgGfx.strokeCircle(t.body.center.x, t.body.center.y, t.body.radius);
-    }
-
-    // segment prev->cur
-    dbgGfx.lineStyle(2, 0xffffff, 0.4);
-    dbgGfx.beginPath();
-    dbgGfx.moveTo(prevCx, prevCy);
-    dbgGfx.lineTo(bunny.body.center.x, bunny.body.center.y);
-    dbgGfx.strokePath();
-  }
-
-  // -----------------------
-  // Update
-  // -----------------------
-  function update(time, delta) {
-    moveTargets();
-    sweptHitCheck(this);
-
-    // Debug auto-off
-    if (debugOn && this.time.now > debugUntilMs) {
-      debugOn = false;
-      dbgGfx.clear();
-    }
-    if (debugOn) drawDebug(this);
-
-    // ground friction: no sliding
-    const onGround = !!(bunny.body.blocked.down || bunny.body.touching.down);
-    if (onGround) {
-      bunny.setDragX(2200);
-      if (Math.abs(bunny.body.velocity.x) < 35) bunny.setVelocityX(0);
-    } else {
-      bunny.setDragX(40);
-    }
-
-    if (!jumpActive) return;
-
-    if (Math.abs(bunny.body.velocity.x) > 20) {
-      bunny.setFlipX(bunny.body.velocity.x < 0);
-    }
-
-    const speed = bunny.body.speed;
-
-    if (onGround && speed < MIN_SPEED_REST) {
-      restFrames++;
-      if (!landedOnce) {
-        landedOnce = true;
-        safePlay("land");
-      }
-    } else {
-      restFrames = 0;
-    }
-
-    const timeoutPassed = (this.time.now - attemptStartMs) > ATTEMPT_TIMEOUT_MS;
-
-    const end =
-      restFrames >= REST_FRAMES_TO_RESET ||
-      (timeoutPassed && speed < MIN_SPEED_TIMEOUT) ||
-      bunny.y > H + 200;
-
-    if (end) endAttempt(this, { pepper: false });
-  }
-</script>
+    <div id="game"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+    <script>
+        const W = 960;
+        const H = 720;
+
+        const btnW = 140;
+        const btnH = 44;
+        const btnX = W - 16 - btnW / 2;
+        const btnY = 16 + btnH / 2;
+
+        // Bunny sheet: 192x128 => 6x4 => 32x32
+        const FRAME_W = 32;
+        const FRAME_H = 32;
+
+        // Gameplay
+        const GROUND_Y = 600;
+        const SPAWN = { x: 150, y: 440 };
+
+        const MAX_PULL = 230;
+        const POWER = 7.0;
+
+        const VEL_LIMIT = 1900;
+        const PHYSICS_FPS = 180;
+
+        // Attempts
+        const MAX_ATTEMPTS = 3;
+        let attemptsLeft = MAX_ATTEMPTS;
+
+        // End-of-attempt / auto reset
+        const REST_FRAMES_TO_RESET = 7;
+        const MIN_SPEED_REST = 18;
+        const ATTEMPT_TIMEOUT_MS = 2200;
+        const MIN_SPEED_TIMEOUT = 90;
+
+        // Targets count
+        const COUNT_CABBAGE = 3; // +10
+        const COUNT_CARROT = 3; // +20
+        const COUNT_PEPPER = 2; // end attempt
+
+        // Movement
+        const TARGET_MOVE_PADDING = 70;
+
+        // Swept collision fudge
+        const HIT_FUDGE = 3;
+
+        // Debug (D) 10s
+        const DEBUG_DURATION_MS = 10000;
+
+        const config = {
+            type: Phaser.AUTO,
+            parent: "game",
+            backgroundColor: "#141a2a",
+            physics: {
+                default: "arcade",
+                arcade: {
+                    gravity: { y: 1150 },
+                    debug: false,
+                    fps: PHYSICS_FPS
+                }
+            },
+            scale: {
+                mode: Phaser.Scale.FIT,
+                autoCenter: Phaser.Scale.CENTER_BOTH,
+                width: W,
+                height: H
+            },
+            scene: { preload, create, update }
+        };
+
+        new Phaser.Game(config);
+
+        let bunny, targets, ground, hud, aimGfx, dbgGfx;
+        let score = 0;
+
+        let aiming = false;
+        let previewVel = { vx: 0, vy: 0 };
+        let previewPullLen = 0;
+
+        let jumpActive = false;
+        let restFrames = 0;
+        let attemptStartMs = 0;
+
+        // Swept collision prev bunny center
+        let prevCx = 0, prevCy = 0;
+
+        // Prevent land spam
+        let landedOnce = false;
+
+        // Debug
+        let debugOn = false;
+        let debugUntilMs = 0;
+
+        function preload() {
+            // Bunny spritesheet
+            this.load.spritesheet("bunny", "assets/bunny.png", {
+                frameWidth: FRAME_W,
+                frameHeight: FRAME_H
+            });
+
+            // Veggies (your images)
+            this.load.image("cabbage", "assets/cabbage.png");
+            this.load.image("carrot", "assets/carrot.png");
+            this.load.image("pepper", "assets/pepper.png");
+
+            this.load.image("bg", "assets/bg.png");
+
+            // Optional background image (if you have it)
+            // this.load.image("bg", "assets/bg.png");
+
+            this.load.on("loaderror", (f) => console.error("LOAD ERROR:", f.key, f.src));
+        }
+
+        function create() {
+            const scene = this;
+            scene.physics.world.setBounds(0, 0, W, H);
+
+            // Background: either image or procedural
+            // If you have bg.png uncomment the load + next line:
+            // scene.add.image(W/2, H/2, "bg").setDisplaySize(W, H).setDepth(-10);
+            // drawBackground(scene);
+
+            const bg = scene.add.image(W / 2, H / 2, "bg").setDepth(-10);
+            bg.setDisplaySize(W, H);
+
+            // 1x1 texture for invisible bodies
+            const g = scene.add.graphics();
+            g.fillStyle(0xffffff, 1);
+            g.fillRect(0, 0, 1, 1);
+            g.generateTexture("px", 1, 1);
+            g.destroy();
+
+            // Invisible ground
+            ground = scene.physics.add.staticImage(W / 2, GROUND_Y, "px")
+                .setDisplaySize(W, 30)
+                .setAlpha(0)
+                .refreshBody();
+
+            // HUD
+            hud = scene.add.text(16, 680, "", {
+                fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
+                fontSize: "16px",
+                color: "#e8e8f0"
+            });
+
+            // Bunny
+            bunny = scene.physics.add.sprite(SPAWN.x, SPAWN.y, "bunny", 19);
+            bunny.setScale(2.2);
+            bunny.setCollideWorldBounds(true);
+            bunny.setBounce(0);
+            bunny.setDrag(40, 0);
+            bunny.setMaxVelocity(VEL_LIMIT, VEL_LIMIT);
+            applyBunnyCircleBody(bunny);
+
+            scene.physics.add.collider(bunny, ground);
+
+            // Animations
+            createBunnyAnimations(scene);
+            bunny.play("idle");
+
+            bunny.on("animationcomplete-land", () => safePlay("idle"));
+
+            // Targets group (moving)
+            targets = scene.physics.add.group({
+                immovable: true,
+                allowGravity: false
+            });
+
+            aimGfx = scene.add.graphics();
+            dbgGfx = scene.add.graphics();
+
+            // Input
+            scene.input.on("pointerdown", (p) => {
+                if (jumpActive) return;
+                if (attemptsLeft <= 0) return;
+
+                const dist = Phaser.Math.Distance.Between(p.x, p.y, bunny.x, bunny.y);
+                if (dist < 160 && bunny.body.speed < 35) {
+                    aiming = true;
+                    previewPullLen = 0;
+                }
+            });
+
+            scene.input.on("pointermove", (p) => {
+                if (!aiming) return;
+
+                let dx = bunny.x - p.x;
+                let dy = bunny.y - p.y;
+
+                const len = Math.hypot(dx, dy) || 1;
+                const k = Math.min(1, MAX_PULL / len);
+                dx *= k; dy *= k;
+
+                previewPullLen = Math.hypot(dx, dy);
+
+                let vx = dx * POWER;
+                let vy = dy * POWER;
+
+                const mag = Math.hypot(vx, vy) || 1;
+                if (mag > VEL_LIMIT) {
+                    const s = VEL_LIMIT / mag;
+                    vx *= s; vy *= s;
+                }
+
+                previewVel.vx = vx;
+                previewVel.vy = vy;
+
+                drawAim(scene, dx, dy, vx, vy);
+            });
+
+            scene.input.on("pointerup", () => {
+                if (!aiming) return;
+                aiming = false;
+                aimGfx.clear();
+
+                if (previewPullLen < 10) return;
+                if (attemptsLeft <= 0) return;
+
+                // consume attempt
+                attemptsLeft = Math.max(0, attemptsLeft - 1);
+                updateHud();
+
+                // Set prev for swept check
+                prevCx = bunny.body.center.x;
+                prevCy = bunny.body.center.y;
+
+                bunny.setVelocity(previewVel.vx, previewVel.vy);
+                jumpActive = true;
+                restFrames = 0;
+                landedOnce = false;
+                attemptStartMs = scene.time.now;
+
+                bunny.setFlipX(bunny.body.velocity.x < 0);
+                safePlay("jump"); // ends on frame 23 (air) — looks good
+            });
+
+            // Keys
+            scene.input.keyboard?.on("keydown-R", () => restart(scene));
+            scene.input.keyboard?.on("keydown-D", () => {
+                debugOn = true;
+                debugUntilMs = scene.time.now + DEBUG_DURATION_MS;
+            });
+
+            restart(scene);
+
+            const restartBtnBg = scene.add.rectangle(btnX, btnY, btnW, btnH, 0xffffff, 0.14)
+                .setStrokeStyle(2, 0xffffff, 0.22)
+                .setScrollFactor(0)
+                .setDepth(1000)
+                .setOrigin(0.5)
+                .setInteractive({ useHandCursor: true });
+
+            const restartBtnText = scene.add.text(btnX, btnY, "Restart", {
+                fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
+                fontSize: "16px",
+                fontStyle: "600",
+                color: "#ffffff"
+            })
+                .setOrigin(0.5)
+                .setScrollFactor(0)
+                .setDepth(1001);
+
+            restartBtnBg.on("pointerover", () => restartBtnBg.setFillStyle(0xffffff, 0.20));
+            restartBtnBg.on("pointerout", () => restartBtnBg.setFillStyle(0xffffff, 0.14));
+            restartBtnBg.on("pointerdown", () => {
+                restartBtnBg.setFillStyle(0xffffff, 0.26);
+                restart(scene);
+            });
+            restartBtnBg.on("pointerup", () => restartBtnBg.setFillStyle(0xffffff, 0.20));
+        }
+
+        // -----------------------
+        // Background (procedural)
+        // -----------------------
+        function drawBackground(scene) {
+            const bg = scene.add.graphics();
+            bg.fillStyle(0x0f1430, 1);
+            bg.fillRect(0, 0, W, H);
+
+            bg.fillStyle(0x1a2352, 0.55);
+            bg.fillCircle(160, 140, 180);
+            bg.fillCircle(520, 90, 240);
+            bg.fillCircle(860, 170, 210);
+
+            bg.fillStyle(0x0b1022, 0.85);
+            bg.fillRect(0, GROUND_Y + 8, W, H - (GROUND_Y + 8));
+
+            bg.lineStyle(2, 0xffffff, 0.08);
+            bg.beginPath();
+            bg.moveTo(0, GROUND_Y);
+            bg.lineTo(W, GROUND_Y);
+            bg.strokePath();
+
+            bg.setDepth(-10);
+        }
+
+        // -----------------------
+        // Animations / helpers
+        // -----------------------
+        function createBunnyAnimations(scene) {
+            scene.anims.create({
+                key: "idle",
+                frames: [{ key: "bunny", frame: 19 }],
+                frameRate: 0,
+                repeat: 0
+            });
+
+            scene.anims.create({
+                key: "jump",
+                frames: [
+                    { key: "bunny", frame: 20 },
+                    { key: "bunny", frame: 21 },
+                    { key: "bunny", frame: 22 },
+                    { key: "bunny", frame: 23 }
+                ],
+                frameRate: 6,
+                repeat: 0
+            });
+
+            scene.anims.create({
+                key: "land",
+                frames: [
+                    { key: "bunny", frame: 23 },
+                    { key: "bunny", frame: 19 }
+                ],
+                frameRate: 8,
+                repeat: 0
+            });
+
+            scene.anims.create({
+                key: "eat",
+                frames: [{ key: "bunny", frame: 2 }, { key: "bunny", frame: 23 }],
+                frameRate: 10,
+                repeat: 0
+            });
+        }
+
+        function safePlay(key) {
+            const cur = bunny.anims.currentAnim?.key;
+            if (cur === key) return;
+            bunny.play(key, true);
+        }
+
+        function applyBunnyCircleBody(spr) {
+            const r = Math.round(Math.min(spr.displayWidth, spr.displayHeight) * 0.30);
+            spr.body.setCircle(r);
+            const offX = Math.round(spr.displayWidth / 2 - r);
+            const offY = Math.round(spr.displayHeight / 2 - r);
+            spr.body.setOffset(offX, offY);
+            spr._hitRadius = r;
+        }
+
+        function setCircleHitboxToSprite(sprite, radiusFactor = 0.36) {
+            const r = Math.round(Math.min(sprite.displayWidth, sprite.displayHeight) * radiusFactor);
+            sprite.body.setCircle(r);
+            sprite.body.setOffset((sprite.displayWidth / 2) - r, (sprite.displayHeight / 2) - r);
+            sprite.setData("hitR", r);
+        }
+
+        // -----------------------
+        // Targets: spawn + movement
+        // -----------------------
+        function spawnTargets(scene) {
+            targets.clear(true, true);
+
+            const items = [];
+            for (let i = 0; i < COUNT_CABBAGE; i++) items.push({ key: "cabbage", points: 10, bad: false });
+            for (let i = 0; i < COUNT_CARROT; i++) items.push({ key: "carrot", points: 20, bad: false });
+            for (let i = 0; i < COUNT_PEPPER; i++) items.push({ key: "pepper", points: 0, bad: true });
+
+            // shuffle
+            Phaser.Utils.Array.Shuffle(items);
+
+            const minX = 430;
+            const maxX = W - 80;
+            const minY = 170;
+            const maxY = 520;
+
+            // Avoid overlaps
+            const placed = [];
+            const minDist = 90;
+
+            for (const it of items) {
+                let x, y, tries = 0;
+                do {
+                    x = Phaser.Math.Between(minX, maxX);
+                    y = Phaser.Math.Between(minY, maxY);
+                    tries++;
+                } while (tries < 40 && placed.some(p => Phaser.Math.Distance.Between(p.x, p.y, x, y) < minDist));
+
+                placed.push({ x, y });
+
+                const s = targets.create(x, y, it.key);
+                s.setData("points", it.points);
+                s.setData("bad", it.bad);
+                s.setData("hit", false);
+
+                // Auto-scale targets to ~64px (feel free to change)
+                const tex = scene.textures.get(it.key).getSourceImage();
+                const desired = 64;
+                const scale = desired / Math.max(tex.width, tex.height);
+                s.setScale(scale);
+
+                setCircleHitboxToSprite(s, 0.38);
+
+                // Movement bounds + velocity
+                const amp = Phaser.Math.Between(90, 200);
+                const speed = Phaser.Math.Between(70, 160) * (Math.random() < 0.5 ? 1 : -1);
+
+                const minTX = Math.max(TARGET_MOVE_PADDING, x - amp);
+                const maxTX = Math.min(W - TARGET_MOVE_PADDING, x + amp);
+
+                s.setData("minX", minTX);
+                s.setData("maxX", maxTX);
+                s.setData("vx", speed);
+                s.setVelocityX(speed);
+            }
+        }
+
+        function moveTargets() {
+            for (const t of targets.getChildren()) {
+                if (!t.active || t.getData("hit")) continue;
+
+                const minX = t.getData("minX");
+                const maxX = t.getData("maxX");
+                let vx = t.getData("vx") || 0;
+
+                if (t.x <= minX && vx < 0) {
+                    vx = Math.abs(vx);
+                    t.setData("vx", vx);
+                    t.setVelocityX(vx);
+                } else if (t.x >= maxX && vx > 0) {
+                    vx = -Math.abs(vx);
+                    t.setData("vx", vx);
+                    t.setVelocityX(vx);
+                }
+            }
+        }
+
+        // -----------------------
+        // Swept collision
+        // -----------------------
+        function segmentIntersectsCircle(ax, ay, bx, by, cx, cy, r) {
+            const dx = bx - ax, dy = by - ay;
+            const a = dx * dx + dy * dy;
+            if (a < 1e-6) {
+                const px = ax - cx, py = ay - cy;
+                return (px * px + py * py) <= r * r;
+            }
+            const t = ((cx - ax) * dx + (cy - ay) * dy) / a;
+            const tt = Math.max(0, Math.min(1, t));
+            const ex = ax + tt * dx, ey = ay + tt * dy;
+            const fx = ex - cx, fy = ey - cy;
+            return (fx * fx + fy * fy) <= r * r;
+        }
+
+        function sweptHitCheck(scene) {
+            if (!jumpActive) return;
+
+            const curCx = bunny.body.center.x;
+            const curCy = bunny.body.center.y;
+
+            const bunnyR = bunny.body.radius || bunny._hitRadius || 16;
+
+            for (const t of targets.getChildren()) {
+                if (!t.active || t.getData("hit")) continue;
+
+                const tr = (t.body.radius || t.getData("hitR") || 20);
+                const rr = tr + bunnyR + HIT_FUDGE;
+
+                const hit = segmentIntersectsCircle(
+                    prevCx, prevCy,
+                    curCx, curCy,
+                    t.body.center.x, t.body.center.y,
+                    rr
+                );
+
+                if (hit) { onHitTarget(scene, t); break; }
+            }
+
+            prevCx = curCx;
+            prevCy = curCy;
+        }
+
+        function onHitTarget(scene, t) {
+            if (t.getData("hit")) return;
+            t.setData("hit", true);
+
+            const bad = t.getData("bad");
+            const points = t.getData("points") || 0;
+
+            // small flash
+            const flash = scene.add.rectangle(t.x, t.y, 70, 70, 0xffffff, 0.15);
+            scene.tweens.add({
+                targets: flash,
+                alpha: 0,
+                scale: 1.6,
+                duration: 150,
+                onComplete: () => flash.destroy()
+            });
+
+            if (bad) {
+                scene.cameras.main.shake(120, 0.004);
+
+                scene.tweens.add({
+                    targets: t,
+                    alpha: 0,
+                    scale: 0,
+                    duration: 140,
+                    onComplete: () => t.disableBody(true, true)
+                });
+
+                endAttempt(scene, { pepper: true });
+                return;
+            }
+
+            // good hit
+            score += points;
+            updateHud();
+
+            safePlay("eat");
+            scene.time.delayedCall(120, () => {
+                if (jumpActive) safePlay("jump");
+                else safePlay("idle");
+            });
+
+            scene.tweens.add({
+                targets: t,
+                alpha: 0,
+                scale: 0,
+                duration: 160,
+                onComplete: () => t.disableBody(true, true)
+            });
+
+            bunny.setVelocity(bunny.body.velocity.x * 0.75, Math.min(bunny.body.velocity.y, -240));
+
+            const remainingGood = targets.getChildren().filter(x => x.active && !x.getData("bad")).length;
+            if (remainingGood === 0) {
+                jumpActive = false;
+                hud.setText(`🎉 WIN! Score: ${score}. Press R to restart.`);
+                bunny.setVelocity(0, 0);
+                safePlay("idle");
+            }
+        }
+
+        // -----------------------
+        // Aim
+        // -----------------------
+        function drawAim(scene, dx, dy, vx, vy) {
+            aimGfx.clear();
+
+            const pullX = bunny.x - dx;
+            const pullY = bunny.y - dy;
+
+            aimGfx.lineStyle(4, 0x4cc9f0, 0.9);
+            aimGfx.beginPath();
+            aimGfx.moveTo(bunny.x, bunny.y);
+            aimGfx.lineTo(pullX, pullY);
+            aimGfx.strokePath();
+
+            const g = scene.physics.world.gravity.y;
+            aimGfx.fillStyle(0xffffff, 0.55);
+
+            for (let i = 1; i <= 18; i++) {
+                const tt = i * 0.07;
+                const px = bunny.x + vx * tt;
+                const py = bunny.y + vy * tt + 0.5 * g * tt * tt;
+                if (px < 0 || px > W || py < 0 || py > H) break;
+                aimGfx.fillCircle(px, py, 3);
+            }
+        }
+
+        // -----------------------
+        // HUD + flow
+        // -----------------------
+        function updateHud() {
+            const remainingGood = targets
+                ? targets.getChildren().filter(t => t.active && !t.getData("bad")).length
+                : 0;
+
+            hud.setText(
+                `Score: ${score} | Attempts: ${attemptsLeft}/${MAX_ATTEMPTS} | Targets: ${remainingGood}\n` +
+                `Drag & release | R — restart | D — debug (10s) | Pepper = end attempt`
+            );
+        }
+
+        function resetBunnyPosition() {
+            bunny.setVelocity(0, 0);
+            bunny.setRotation(0);
+            bunny.body.reset(SPAWN.x, SPAWN.y);
+            bunny.setFlipX(false);
+            safePlay("idle");
+
+            prevCx = bunny.body.center.x;
+            prevCy = bunny.body.center.y;
+        }
+
+        function endAttempt(scene, opts = {}) {
+            jumpActive = false;
+            restFrames = 0;
+            landedOnce = false;
+
+            scene.time.delayedCall(opts.pepper ? 180 : 120, () => {
+                resetBunnyPosition();
+
+                if (attemptsLeft <= 0) {
+                    hud.setText(`💀 GAME OVER! Score: ${score}. Press R to restart.`);
+                } else {
+                    updateHud();
+                }
+            });
+        }
+
+        function restart(scene) {
+            score = 0;
+            attemptsLeft = MAX_ATTEMPTS;
+
+            jumpActive = false;
+            restFrames = 0;
+            landedOnce = false;
+
+            spawnTargets(scene);
+            resetBunnyPosition();
+
+            aimGfx?.clear();
+            dbgGfx?.clear();
+            debugOn = false;
+
+            updateHud();
+        }
+
+        // -----------------------
+        // Debug
+        // -----------------------
+        function drawDebug(scene) {
+            dbgGfx.clear();
+
+            // bunny circle (accurate center)
+            dbgGfx.lineStyle(3, 0x00b7ff, 0.9);
+            const bcx = bunny.body.x + bunny.body.offset.x + bunny.body.radius;
+            const bcy = bunny.body.y + bunny.body.offset.y + bunny.body.radius;
+            dbgGfx.strokeCircle(bcx, bcy, bunny.body.radius);
+
+            // targets circles
+            dbgGfx.lineStyle(3, 0xff2d95, 0.9);
+            for (const t of targets.getChildren()) {
+                if (!t.active) continue;
+                dbgGfx.strokeCircle(t.body.center.x, t.body.center.y, t.body.radius);
+            }
+
+            // segment prev->cur
+            dbgGfx.lineStyle(2, 0xffffff, 0.4);
+            dbgGfx.beginPath();
+            dbgGfx.moveTo(prevCx, prevCy);
+            dbgGfx.lineTo(bunny.body.center.x, bunny.body.center.y);
+            dbgGfx.strokePath();
+        }
+
+        // -----------------------
+        // Update
+        // -----------------------
+        function update(time, delta) {
+            moveTargets();
+            sweptHitCheck(this);
+
+            // Debug auto-off
+            if (debugOn && this.time.now > debugUntilMs) {
+                debugOn = false;
+                dbgGfx.clear();
+            }
+            if (debugOn) drawDebug(this);
+
+            // ground friction: no sliding
+            const onGround = !!(bunny.body.blocked.down || bunny.body.touching.down);
+            if (onGround) {
+                bunny.setDragX(2200);
+                if (Math.abs(bunny.body.velocity.x) < 35) bunny.setVelocityX(0);
+            } else {
+                bunny.setDragX(40);
+            }
+
+            if (!jumpActive) return;
+
+            if (Math.abs(bunny.body.velocity.x) > 20) {
+                bunny.setFlipX(bunny.body.velocity.x < 0);
+            }
+
+            const speed = bunny.body.speed;
+
+            if (onGround && speed < MIN_SPEED_REST) {
+                restFrames++;
+                if (!landedOnce) {
+                    landedOnce = true;
+                    safePlay("land");
+                }
+            } else {
+                restFrames = 0;
+            }
+
+            const timeoutPassed = (this.time.now - attemptStartMs) > ATTEMPT_TIMEOUT_MS;
+
+            const end =
+                restFrames >= REST_FRAMES_TO_RESET ||
+                (timeoutPassed && speed < MIN_SPEED_TIMEOUT) ||
+                bunny.y > H + 200;
+
+            if (end) endAttempt(this, { pepper: false });
+        }
+    </script>
 </body>
+
 </html>
